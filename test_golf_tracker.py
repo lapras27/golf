@@ -7,6 +7,7 @@ from golf_tracker import (
     add_player,
     delete_round,
     get_all_scores,
+    get_round_scores,
     initialize_database,
     list_players,
     list_rounds,
@@ -58,6 +59,63 @@ class GolfTrackerTests(unittest.TestCase):
                 self.database,
             )
         self.assertEqual(list_rounds(self.database), [])
+
+    def test_saves_back_nine_and_includes_it_in_player_analysis(self):
+        player_id = add_player("Aki", self.database)
+        pars = [4, 4, 3, 4, 5, 4, 3, 4, 5]
+        scores = [par + 1 for par in pars]
+        round_id = save_round(
+            "2026-10-05",
+            "午後ハーフ",
+            "緑カントリー",
+            [player_id],
+            pars,
+            {player_id: scores},
+            self.database,
+            hole_numbers=range(10, 19),
+        )
+
+        self.assertEqual(list_rounds(self.database)[0]["hole_count"], 9)
+        self.assertEqual(
+            [row["hole"] for row in get_round_scores(round_id, self.database)],
+            list(range(10, 19)),
+        )
+        summary = summarize_players(get_all_scores(self.database))[0]
+        self.assertEqual(summary["round_count"], 1)
+        self.assertEqual(summary["hole_count"], 9)
+        self.assertEqual(summary["average_score"], 90)
+        self.assertEqual(summary["average_over_par"], 18)
+        self.assertEqual(len(summary["radar_metrics"]), 5)
+        self.assertEqual(summary["radar_metrics"][1]["sample_count"], 2)
+        self.assertEqual(summary["radar_metrics"][4]["score"], 100)
+
+    def test_mixes_nine_and_eighteen_hole_rounds_by_hole_average(self):
+        player_id = add_player("Aki", self.database)
+        save_round(
+            "2026-10-05",
+            "ハーフ",
+            "緑カントリー",
+            [player_id],
+            [4] * 9,
+            {player_id: [5] * 9},
+            self.database,
+            hole_numbers=range(1, 10),
+        )
+        save_round(
+            "2026-10-06",
+            "通常ラウンド",
+            "青カントリー",
+            [player_id],
+            [4] * 18,
+            {player_id: [4] * 18},
+            self.database,
+        )
+
+        summary = summarize_players(get_all_scores(self.database))[0]
+        self.assertEqual(summary["round_count"], 2)
+        self.assertEqual(summary["hole_count"], 27)
+        self.assertAlmostEqual(summary["average_score"], 78)
+        self.assertAlmostEqual(summary["average_over_par"], 6)
 
     def test_rejects_fractional_strokes_without_truncating(self):
         player_id = add_player("Aki", self.database)

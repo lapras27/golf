@@ -1,5 +1,6 @@
 import hmac
 import json
+import math
 import os
 import sqlite3
 
@@ -33,6 +34,57 @@ def configured_value(key, default=""):
         return st.secrets.get(key, default)
     except StreamlitSecretNotFoundError:
         return default
+
+
+def radar_chart_svg(metrics):
+    width, height = 440, 390
+    center_x, center_y, radius = width / 2, height / 2, 125
+    angles = [
+        -math.pi / 2 + index * 2 * math.pi / len(metrics)
+        for index in range(len(metrics))
+    ]
+
+    def points(scale):
+        return " ".join(
+            f"{center_x + radius * scale * math.cos(angle):.1f},"
+            f"{center_y + radius * scale * math.sin(angle):.1f}"
+            for angle in angles
+        )
+
+    rings = "".join(
+        f'<polygon points="{points(level / 100)}" fill="none" '
+        'stroke="#d9e0ea" stroke-width="1"/>'
+        for level in (20, 40, 60, 80, 100)
+    )
+    axes = "".join(
+        f'<line x1="{center_x}" y1="{center_y}" '
+        f'x2="{center_x + radius * math.cos(angle):.1f}" '
+        f'y2="{center_y + radius * math.sin(angle):.1f}" '
+        'stroke="#d9e0ea" stroke-width="1"/>'
+        for angle in angles
+    )
+    values = " ".join(
+        f"{center_x + radius * metric['score'] / 100 * math.cos(angle):.1f},"
+        f"{center_y + radius * metric['score'] / 100 * math.sin(angle):.1f}"
+        for metric, angle in zip(metrics, angles)
+    )
+    labels = "".join(
+        f'<text x="{center_x + (radius + 27) * math.cos(angle):.1f}" '
+        f'y="{center_y + (radius + 27) * math.sin(angle):.1f}" '
+        'text-anchor="middle" dominant-baseline="middle" '
+        'font-size="14" fill="#344054">'
+        f"{metric['label']}</text>"
+        for metric, angle in zip(metrics, angles)
+    )
+    return (
+        f'<svg viewBox="0 0 {width} {height}" role="img" '
+        'aria-label="5指標のレーダーチャート" '
+        'xmlns="http://www.w3.org/2000/svg">'
+        f"{rings}{axes}"
+        f'<polygon points="{values}" fill="#4f8bf9" fill-opacity="0.24" '
+        'stroke="#2563eb" stroke-width="2.5"/>'
+        f"{labels}</svg>"
+    )
 
 
 def render_login():
@@ -87,7 +139,7 @@ with st.sidebar:
             st.rerun()
 
 players = list_players()
-tabs = st.tabs(["スコア入力", "ラウンド一覧", "成長・AI分析"])
+tabs = st.tabs(["スコア入力", "ラウンド一覧", "成長・AI分析", "個人分析"])
 
 with tabs[0]:
     st.header("ラウンドを記録")
@@ -104,16 +156,33 @@ with tabs[0]:
         if not selected_players:
             st.info("スコアを記録する参加者を選択してください。")
         else:
-            pars = [4, 4, 3, 4, 5, 4, 3, 4, 5, 4, 4, 3, 5, 4, 4, 3, 4, 5]
-            initial = {"ホール": list(range(1, 19)), "パー": pars}
+            all_pars = [4, 4, 3, 4, 5, 4, 3, 4, 5, 4, 4, 3, 5, 4, 4, 3, 4, 5]
+            round_format = st.radio(
+                "ラウンド形式",
+                ["18ホール", "前半9ホール（1〜9番）", "後半9ホール（10〜18番）"],
+                horizontal=True,
+            )
+            hole_numbers = (
+                list(range(1, 19))
+                if round_format == "18ホール"
+                else list(range(1, 10))
+                if round_format.startswith("前半")
+                else list(range(10, 19))
+            )
+            pars = [all_pars[hole - 1] for hole in hole_numbers]
+            hole_count = len(hole_numbers)
+            initial = {"ホール": hole_numbers, "パー": pars}
             for player in selected_players:
-                initial[player["name"]] = pd.Series([None] * 18, dtype="Int64")
+                initial[player["name"]] = pd.Series([None] * hole_count, dtype="Int64")
             with st.form("round_entry"):
                 round_title = st.text_input("ラウンド名", placeholder="例: 秋のゴルフ会")
                 first, second = st.columns(2)
                 round_date = first.date_input("プレー日")
                 course = second.text_input("ゴルフ場", placeholder="例: ○○カントリークラブ")
-                st.caption("パーと各プレイヤーのスコアを入力してください（スコアは1〜30）。")
+                st.caption(
+                    f"{hole_count}ホール分のパーと各プレイヤーのスコアを入力してください"
+                    "（スコアは1〜30）。"
+                )
                 score_table = st.data_editor(
                     pd.DataFrame(initial),
                     hide_index=True,
@@ -141,7 +210,9 @@ with tabs[0]:
                     for player in selected_players:
                         column = score_table[player["name"]]
                         if column.isna().any():
-                            raise ValueError(f"{player['name']} の18ホール分のスコアを入力してください。")
+                            raise ValueError(
+                                f"{player['name']} の{hole_count}ホール分のスコアを入力してください。"
+                            )
                         scores[player["id"]] = column.tolist()
                     round_id = save_round(
                         round_date,
@@ -150,6 +221,7 @@ with tabs[0]:
                         [player["id"] for player in selected_players],
                         score_table["パー"].tolist(),
                         scores,
+                        hole_numbers=hole_numbers,
                     )
                 except (ValueError, TypeError) as error:
                     st.error(str(error))
@@ -167,7 +239,7 @@ with tabs[1]:
         round_labels = {
             item["id"]: (
                 f"{item['played_on']}  |  {item['title']}  |  {item['course']} "
-                f"({item['player_count']}人)"
+                f"({item['hole_count']}H・{item['player_count']}人)"
             )
             for item in rounds
         }
@@ -180,7 +252,7 @@ with tabs[1]:
         if rows:
             meta = rows[0]
             st.subheader(f"{meta['title']} — {meta['course']}")
-            st.caption(meta["played_on"])
+            st.caption(f"{meta['played_on']}・{len({row['hole'] for row in rows})}ホール")
             detail = pd.DataFrame(rows)
             table = detail.pivot(index="hole", columns="player", values="strokes")
             table.index.name = "ホール"
@@ -206,20 +278,21 @@ with tabs[2]:
     all_scores = get_all_scores()
     summaries = summarize_players(all_scores)
     if not summaries:
-        st.info("18ホールの記録が追加されると、ここに分析が表示されます。")
+        st.info("9ホールまたは18ホールの記録が追加されると、ここに分析が表示されます。")
     else:
         st.caption(
-            "比較は登録済みの18ホール平均に基づく参考値です。"
+            "9ホールと18ホールの記録を1ホール当たりで集計しています。"
+            "平均スコア・推移は18ホール換算の単純換算値です。"
             "初心者〜上級者の目安は平均オーバーパーによる独自分類で、公式ハンディキャップではありません。"
         )
         overview = pd.DataFrame(
             [
                 {
                     "プレイヤー": item["player"],
-                    "ラウンド数": item["round_count"],
+                    "記録数": item["round_count"],
                     "平均スコア": round(item["average_score"], 1),
                     "平均対パー": f"{item['average_over_par']:+.1f}",
-                    "ベスト": item["best_score"],
+                    "ベスト（18H換算）": round(item["best_score"], 1),
                     "直近平均との差": f"{item['improvement']:+.1f}",
                     "目安": item["level"],
                 }
@@ -237,12 +310,12 @@ with tabs[2]:
         for item in summaries:
             if item["player"] in chosen_names:
                 chart_data[item["player"]] = {
-                    f"{round_['played_on']} #{index}": round_["total"]
+                    f"{round_['played_on']} #{index}": round_["equivalent_total"]
                     for index, round_ in enumerate(item["rounds"], start=1)
                 }
         if chart_data:
             chart = pd.DataFrame.from_dict(chart_data, orient="index").T
-            st.line_chart(chart, y_label="18ホール合計")
+            st.line_chart(chart, y_label="18ホール換算スコア")
 
         st.subheader("得意・課題ホール")
         hole_table = pd.DataFrame(
@@ -288,6 +361,7 @@ with tabs[2]:
                     {
                         "player": item["player"],
                         "round_count": item["round_count"],
+                        "recorded_holes": item["hole_count"],
                         "average_score": round(item["average_score"], 1),
                         "average_over_par": round(item["average_over_par"], 1),
                         "best_score": item["best_score"],
@@ -308,6 +382,7 @@ with tabs[2]:
                                 "content": (
                                     "あなたは親しみやすいゴルフコーチです。日本語で、"
                                     "各人の変化、比較、得意・課題、具体的な練習案を簡潔に説明してください。"
+                                    "平均スコアは9ホール記録を含む18ホール換算の単純な参考値だと説明してください。"
                                     "ラウンド数が少ない場合は断定を避け、レベル分類が公式ではないと明記してください。"
                                     "データからわからないことは推測しないでください。"
                                 ),
@@ -321,3 +396,57 @@ with tabs[2]:
                     st.markdown(response.choices[0].message.content or "AIから本文が返りませんでした。")
                 except APIError as error:
                     st.error(f"OpenAI APIの呼び出しに失敗しました: {error}")
+
+with tabs[3]:
+    st.header("プレイヤー別レーダー分析")
+    if not summaries:
+        st.info("9ホールまたは18ホールの記録が追加されると、個人分析を表示できます。")
+    else:
+        radar_player = st.selectbox(
+            "分析するプレイヤー",
+            [item["player"] for item in summaries],
+            key="radar_player",
+        )
+        radar_summary = next(
+            item for item in summaries if item["player"] == radar_player
+        )
+        radar_metrics = radar_summary["radar_metrics"]
+        radar_chart_column, radar_table_column = st.columns([1, 1])
+        with radar_chart_column:
+            if all(metric["score"] is not None for metric in radar_metrics):
+                st.html(radar_chart_svg(radar_metrics))
+            else:
+                missing_metrics = [
+                    metric["label"]
+                    for metric in radar_metrics
+                    if metric["score"] is None
+                ]
+                st.info(
+                    f"{', '.join(missing_metrics)} のデータがないため、"
+                    "記録が増えるとレーダーチャートを表示できます。"
+                )
+        with radar_table_column:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "指標": metric["label"],
+                            "スコア": (
+                                f"{metric['score']:.0f}/100"
+                                if metric["score"] is not None
+                                else "—"
+                            ),
+                            "実績": metric["detail"],
+                            "対象ホール数": metric["sample_count"],
+                        }
+                        for metric in radar_metrics
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+        st.caption(
+            "総合スコアとPar別指標は平均対パー差から算出し、安定性は"
+            "各ホールの対パー差のばらつきが小さいほど高くなる独自の0〜100点です。"
+            "ショットやパット等の記録ではなく、記録済みスコアだけから見る参考値です。"
+        )

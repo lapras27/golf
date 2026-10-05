@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import statistics
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import date
@@ -87,12 +88,42 @@ def add_player(name, database=None):
         return cursor.lastrowid
 
 
-def save_round(played_on, title, course, player_ids, pars, player_scores, database=None):
+def save_round(
+    played_on,
+    title,
+    course,
+    player_ids,
+    pars,
+    player_scores,
+    database=None,
+    hole_numbers=None,
+):
     clean_title = title.strip()
     clean_course = course.strip()
     if not clean_title or not clean_course:
         raise ValueError("ラウンド名とゴルフ場を入力してください。")
-    if len(pars) != 18:
+    selected_holes = (
+        list(range(1, 19))
+        if hole_numbers is None
+        else [
+            _as_integer(hole, "ホール番号は1〜18で指定してください。")
+            for hole in hole_numbers
+        ]
+    )
+    if len(selected_holes) not in (9, 18) or len(set(selected_holes)) != len(
+        selected_holes
+    ):
+        raise ValueError("ラウンドは9ホールまたは18ホールで記録してください。")
+    if any(not 1 <= hole <= 18 for hole in selected_holes):
+        raise ValueError("ホール番号は1〜18で指定してください。")
+    if len(selected_holes) == 18 and selected_holes != list(range(1, 19)):
+        raise ValueError("18ホールは1番から18番まで指定してください。")
+    if len(selected_holes) == 9 and selected_holes not in (
+        list(range(1, 10)),
+        list(range(10, 19)),
+    ):
+        raise ValueError("ハーフラウンドは前半9ホールまたは後半9ホールを指定してください。")
+    if len(pars) != len(selected_holes):
         raise ValueError("各ホールのパーは3〜6で入力してください。")
     validated_pars = [
         _as_integer(par, "各ホールのパーは3〜6で入力してください。")
@@ -106,8 +137,8 @@ def save_round(played_on, title, course, player_ids, pars, player_scores, databa
         raise ValueError("参加者全員のスコアを入力してください。")
     validated_scores = {}
     for scores in player_scores.values():
-        if len(scores) != 18:
-            raise ValueError("18ホール分のスコアを入力してください。")
+        if len(scores) != len(selected_holes):
+            raise ValueError(f"{len(selected_holes)}ホール分のスコアを入力してください。")
     for player_id, scores in player_scores.items():
         parsed_scores = [
             _as_integer(score, "各ホールのスコアは1〜30で入力してください。")
@@ -140,9 +171,11 @@ def save_round(played_on, title, course, player_ids, pars, player_scores, databa
             VALUES (?, ?, ?, ?, ?)
             """,
             [
-                (round_id, player_id, hole, validated_pars[hole - 1], strokes)
+                (round_id, player_id, hole, par, strokes)
                 for player_id in player_ids
-                for hole, strokes in enumerate(validated_scores[player_id], start=1)
+                for hole, par, strokes in zip(
+                    selected_holes, validated_pars, validated_scores[player_id]
+                )
             ],
         )
     return round_id
@@ -153,7 +186,8 @@ def list_rounds(database=None):
         rows = connection.execute(
             """
             SELECT r.id, r.played_on, r.title, r.course,
-                   COUNT(DISTINCT s.player_id) AS player_count
+                   COUNT(DISTINCT s.player_id) AS player_count,
+                   COUNT(DISTINCT s.hole) AS hole_count
             FROM rounds r
             LEFT JOIN scores s ON s.round_id = r.id
             GROUP BY r.id
@@ -231,13 +265,17 @@ def summarize_players(score_rows):
         completed = []
         for holes in rounds.values():
             holes.sort(key=lambda item: item["hole"])
-            if len(holes) == 18:
+            if len(holes) in (9, 18):
+                hole_count = len(holes)
+                total = sum(item["strokes"] for item in holes)
                 completed.append(
                     {
                         "played_on": holes[0]["played_on"],
                         "title": holes[0]["title"],
                         "course": holes[0]["course"],
-                        "total": sum(item["strokes"] for item in holes),
+                        "total": total,
+                        "hole_count": hole_count,
+                        "equivalent_total": total / hole_count * 18,
                         "par": sum(item["par"] for item in holes),
                         "by_hole": holes,
                     }
@@ -251,20 +289,25 @@ def summarize_players(score_rows):
             for round_ in completed
             for hole in round_["by_hole"]
         ]
+        average_over_par_per_hole = sum(deltas) / len(deltas)
+        average_strokes_per_hole = sum(
+            hole["strokes"]
+            for round_ in completed
+            for hole in round_["by_hole"]
+        ) / len(deltas)
+        hole_deltas_by_number = defaultdict(list)
+        deltas_by_par = {3: [], 4: [], 5: []}
+        for round_ in completed:
+            for hole in round_["by_hole"]:
+                delta = hole["strokes"] - hole["par"]
+                hole_deltas_by_number[hole["hole"]].append(delta)
+                if hole["par"] in deltas_by_par:
+                    deltas_by_par[hole["par"]].append(delta)
         hole_deltas = [
-            (
-                hole_number,
-                sum(
-                    hole["strokes"] - hole["par"]
-                    for round_ in completed
-                    for hole in round_["by_hole"]
-                    if hole["hole"] == hole_number
-                )
-                / len(completed),
-            )
-            for hole_number in range(1, 19)
+            (hole_number, sum(values) / len(values))
+            for hole_number, values in hole_deltas_by_number.items()
         ]
-        average_over_par = sum(deltas) / len(completed)
+        average_over_par = average_over_par_per_hole * 18
         if average_over_par < 0:
             level = "上級者（アンダーパー平均）"
         elif average_over_par < 18:
@@ -276,21 +319,59 @@ def summarize_players(score_rows):
 
         recent = completed[-3:]
         earliest = completed[:3]
-        recent_average = sum(item["total"] for item in recent) / len(recent)
-        early_average = sum(item["total"] for item in earliest) / len(earliest)
+        recent_average = sum(item["equivalent_total"] for item in recent) / len(recent)
+        early_average = sum(item["equivalent_total"] for item in earliest) / len(earliest)
+        radar_metrics = [
+            {
+                "label": "総合スコア",
+                "score": max(0, min(100, 75 - 25 * average_over_par_per_hole)),
+                "detail": f"平均 {average_over_par_per_hole:+.2f}打/ホール",
+                "sample_count": len(deltas),
+            }
+        ]
+        for par in (3, 4, 5):
+            par_deltas = deltas_by_par[par]
+            average_delta = sum(par_deltas) / len(par_deltas) if par_deltas else None
+            radar_metrics.append(
+                {
+                    "label": f"Par {par}",
+                    "score": (
+                        max(0, min(100, 75 - 25 * average_delta))
+                        if average_delta is not None
+                        else None
+                    ),
+                    "detail": (
+                        f"平均 {average_delta:+.2f}打/ホール"
+                        if average_delta is not None
+                        else "記録なし"
+                    ),
+                    "sample_count": len(par_deltas),
+                }
+            )
+        scoring_spread = statistics.pstdev(deltas)
+        radar_metrics.append(
+            {
+                "label": "安定性",
+                "score": max(0, min(100, 100 - 25 * scoring_spread)),
+                "detail": f"対パー差のばらつき {scoring_spread:.2f}打",
+                "sample_count": len(deltas),
+            }
+        )
         summaries.append(
             {
                 "player_id": player_id,
                 "player": name,
                 "round_count": len(completed),
-                "average_score": sum(item["total"] for item in completed) / len(completed),
+                "hole_count": len(deltas),
+                "average_score": average_strokes_per_hole * 18,
                 "average_over_par": average_over_par,
-                "best_score": min(item["total"] for item in completed),
+                "best_score": min(item["equivalent_total"] for item in completed),
                 "recent_average": recent_average,
                 "early_average": early_average,
                 "improvement": early_average - recent_average,
                 "strongest_hole": min(hole_deltas, key=lambda item: item[1]),
                 "weakest_hole": max(hole_deltas, key=lambda item: item[1]),
+                "radar_metrics": radar_metrics,
                 "level": level,
                 "rounds": completed,
             }
@@ -300,7 +381,7 @@ def summarize_players(score_rows):
 
 def build_local_report(summaries):
     if not summaries:
-        return "分析できる18ホールのスコアがまだありません。"
+        return "分析できる9ホールまたは18ホールのスコアがまだありません。"
     lines = []
     for item in summaries:
         trend = (
@@ -311,7 +392,7 @@ def build_local_report(summaries):
             else "初期と直近の平均は同じ"
         )
         lines.append(
-            f"**{item['player']}**：18ホール平均 {item['average_score']:.1f}打 "
+            f"**{item['player']}**：18ホール換算平均 {item['average_score']:.1f}打 "
             f"(平均 {item['average_over_par']:+.1f}), {item['level']}。"
             f"{trend}。得意は{item['strongest_hole'][0]}番、"
             f"課題は{item['weakest_hole'][0]}番です。"
