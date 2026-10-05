@@ -36,55 +36,122 @@ def configured_value(key, default=""):
         return default
 
 
-def radar_chart_svg(metrics):
-    width, height = 440, 390
-    center_x, center_y, radius = width / 2, height / 2, 125
+def build_radar_chart(metrics):
+    radius = 1
     angles = [
         -math.pi / 2 + index * 2 * math.pi / len(metrics)
         for index in range(len(metrics))
     ]
-
-    def points(scale):
-        return " ".join(
-            f"{center_x + radius * scale * math.cos(angle):.1f},"
-            f"{center_y + radius * scale * math.sin(angle):.1f}"
-            for angle in angles
+    rows = []
+    score_points = []
+    for level in (20, 40, 60, 80, 100):
+        for index in range(len(metrics) + 1):
+            angle = angles[index % len(metrics)]
+            rows.append(
+                {
+                    "kind": "grid",
+                    "group": f"grid-{level}",
+                    "order": index,
+                    "x": radius * level / 100 * math.cos(angle),
+                    "y": radius * level / 100 * math.sin(angle),
+                }
+            )
+    for index, angle in enumerate(angles):
+        rows.append(
+            {
+                "kind": "axis",
+                "group": f"axis-{index}",
+                "x": 0,
+                "y": 0,
+                "x2": radius * math.cos(angle),
+                "y2": radius * math.sin(angle),
+            }
         )
-
-    rings = "".join(
-        f'<polygon points="{points(level / 100)}" fill="none" '
-        'stroke="#d9e0ea" stroke-width="1"/>'
-        for level in (20, 40, 60, 80, 100)
-    )
-    axes = "".join(
-        f'<line x1="{center_x}" y1="{center_y}" '
-        f'x2="{center_x + radius * math.cos(angle):.1f}" '
-        f'y2="{center_y + radius * math.sin(angle):.1f}" '
-        'stroke="#d9e0ea" stroke-width="1"/>'
-        for angle in angles
-    )
-    values = " ".join(
-        f"{center_x + radius * metric['score'] / 100 * math.cos(angle):.1f},"
-        f"{center_y + radius * metric['score'] / 100 * math.sin(angle):.1f}"
-        for metric, angle in zip(metrics, angles)
-    )
-    labels = "".join(
-        f'<text x="{center_x + (radius + 27) * math.cos(angle):.1f}" '
-        f'y="{center_y + (radius + 27) * math.sin(angle):.1f}" '
-        'text-anchor="middle" dominant-baseline="middle" '
-        'font-size="14" fill="#344054">'
-        f"{metric['label']}</text>"
-        for metric, angle in zip(metrics, angles)
-    )
-    return (
-        f'<svg viewBox="0 0 {width} {height}" role="img" '
-        'aria-label="5指標のレーダーチャート" '
-        'xmlns="http://www.w3.org/2000/svg">'
-        f"{rings}{axes}"
-        f'<polygon points="{values}" fill="#4f8bf9" fill-opacity="0.24" '
-        'stroke="#2563eb" stroke-width="2.5"/>'
-        f"{labels}</svg>"
-    )
+        metric = metrics[index]
+        rows.append(
+            {
+                "kind": "label",
+                "x": radius * 1.2 * math.cos(angle),
+                "y": radius * 1.2 * math.sin(angle),
+                "label": metric["label"],
+            }
+        )
+        score_point = {
+            "kind": "score",
+            "group": "score",
+            "order": index,
+            "x": radius * metric["score"] / 100 * math.cos(angle),
+            "y": radius * metric["score"] / 100 * math.sin(angle),
+            "label": metric["label"],
+            "value": metric["score"],
+        }
+        score_points.append(score_point)
+        rows.append(score_point)
+    rows.append({**score_points[0], "order": len(metrics)})
+    chart = {
+        "width": 420,
+        "height": 420,
+        "layer": [
+            {
+                "transform": [{"filter": "datum.kind === 'grid'"}],
+                "mark": {"type": "line", "color": "#98a2b3", "opacity": 0.5},
+                "encoding": {
+                    "detail": {"field": "group", "type": "nominal"},
+                    "order": {"field": "order", "type": "quantitative"},
+                },
+            },
+            {
+                "transform": [{"filter": "datum.kind === 'axis'"}],
+                "mark": {"type": "rule", "color": "#98a2b3", "opacity": 0.5},
+                "encoding": {
+                    "x2": {"field": "x2", "type": "quantitative"},
+                    "y2": {"field": "y2", "type": "quantitative"},
+                },
+            },
+            {
+                "transform": [{"filter": "datum.kind === 'score'"}],
+                "mark": {
+                    "type": "line",
+                    "color": "#2563eb",
+                    "strokeWidth": 3,
+                    "point": {"filled": True, "size": 65},
+                },
+                "encoding": {
+                    "detail": {"field": "group", "type": "nominal"},
+                    "order": {"field": "order", "type": "quantitative"},
+                    "tooltip": [
+                        {"field": "label", "type": "nominal", "title": "指標"},
+                        {"field": "value", "type": "quantitative", "title": "スコア"},
+                    ],
+                },
+            },
+            {
+                "transform": [{"filter": "datum.kind === 'label'"}],
+                "mark": {
+                    "type": "text",
+                    "fontSize": 13,
+                    "fontWeight": "bold",
+                },
+                "encoding": {"text": {"field": "label", "type": "nominal"}},
+            },
+        ],
+        "encoding": {
+            "x": {
+                "field": "x",
+                "type": "quantitative",
+                "scale": {"domain": [-1.35, 1.35]},
+                "axis": None,
+            },
+            "y": {
+                "field": "y",
+                "type": "quantitative",
+                "scale": {"domain": [-1.35, 1.35]},
+                "axis": None,
+            },
+        },
+        "config": {"view": {"stroke": None}},
+    }
+    return pd.DataFrame(rows), chart
 
 
 def render_login():
@@ -414,7 +481,14 @@ with tabs[3]:
         radar_chart_column, radar_table_column = st.columns([1, 1])
         with radar_chart_column:
             if all(metric["score"] is not None for metric in radar_metrics):
-                st.html(radar_chart_svg(radar_metrics))
+                radar_data, radar_spec = build_radar_chart(radar_metrics)
+                st.vega_lite_chart(
+                    radar_data,
+                    radar_spec,
+                    width="stretch",
+                    height=460,
+                    key="player_radar_chart",
+                )
             else:
                 missing_metrics = [
                     metric["label"]
