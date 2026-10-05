@@ -406,3 +406,76 @@ def build_local_report(summaries):
             f"{bottom['average_score']:.1f}打です。コースやパーの違いも考慮して参考にしてください。"
         )
     return "\n\n".join(lines)
+
+
+def build_ai_comparison_data(summaries):
+    players = [
+        {
+            "player": item["player"],
+            "round_count": item["round_count"],
+            "recorded_holes": item["hole_count"],
+            "average_score_18_hole_equivalent": round(item["average_score"], 1),
+            "average_over_par_18_hole_equivalent": round(
+                item["average_over_par"], 1
+            ),
+            "best_score_18_hole_equivalent": round(item["best_score"], 1),
+            "early_to_recent_improvement": round(item["improvement"], 1),
+            "strongest_hole": item["strongest_hole"][0],
+            "strongest_hole_average_over_par": round(
+                item["strongest_hole"][1], 2
+            ),
+            "weakest_hole": item["weakest_hole"][0],
+            "weakest_hole_average_over_par": round(
+                item["weakest_hole"][1], 2
+            ),
+            "radar_metrics": {
+                metric["label"]: {
+                    "score": (
+                        round(metric["score"], 1)
+                        if metric["score"] is not None
+                        else None
+                    ),
+                    "detail": metric["detail"],
+                    "sample_count": metric["sample_count"],
+                }
+                for metric in item["radar_metrics"]
+            },
+        }
+        for item in summaries
+    ]
+    comparisons = []
+    for index, first in enumerate(players):
+        for second in players[index + 1 :]:
+            comparisons.append(
+                {
+                    "players": [first["player"], second["player"]],
+                    "first_minus_second_18_hole_average": round(
+                        first["average_score_18_hole_equivalent"]
+                        - second["average_score_18_hole_equivalent"],
+                        1,
+                    ),
+                    "first_minus_second_average_over_par": round(
+                        first["average_over_par_18_hole_equivalent"]
+                        - second["average_over_par_18_hole_equivalent"],
+                        1,
+                    ),
+                    "first_minus_second_improvement": round(
+                        first["early_to_recent_improvement"]
+                        - second["early_to_recent_improvement"],
+                        1,
+                    ),
+                    "first_minus_second_radar_scores": {
+                        label: round(
+                            first["radar_metrics"][label]["score"]
+                            - second["radar_metrics"][label]["score"],
+                            1,
+                        )
+                        if first["radar_metrics"][label]["score"] is not None
+                        and second["radar_metrics"][label]["score"] is not None
+                        else None
+                        for label in first["radar_metrics"]
+                        if label in second["radar_metrics"]
+                    },
+                }
+            )
+    return {"players": players, "pairwise_comparisons": comparisons}

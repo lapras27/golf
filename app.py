@@ -11,6 +11,7 @@ from streamlit.errors import StreamlitSecretNotFoundError
 
 from golf_tracker import (
     add_player,
+    build_ai_comparison_data,
     build_local_report,
     delete_round,
     get_all_scores,
@@ -408,7 +409,7 @@ with tabs[2]:
                 "設定がなくても上の統計レポートは利用できます。"
             )
         st.caption(
-            "AIレポートを実行すると、選択したプレイヤー名と集計スコアがOpenAI APIへ送信されます。"
+            "AIレポートを実行すると、選択したプレイヤー名・集計スコア・プレイヤー間の比較値がOpenAI APIへ送信されます。"
             "本名ではなくニックネームの利用をおすすめします。"
         )
         report_names = st.multiselect(
@@ -424,21 +425,7 @@ with tabs[2]:
             if not selected_summaries:
                 st.error("分析するプレイヤーを選んでください。")
             else:
-                prompt_data = [
-                    {
-                        "player": item["player"],
-                        "round_count": item["round_count"],
-                        "recorded_holes": item["hole_count"],
-                        "average_score": round(item["average_score"], 1),
-                        "average_over_par": round(item["average_over_par"], 1),
-                        "best_score": item["best_score"],
-                        "improvement": round(item["improvement"], 1),
-                        "strongest_hole": item["strongest_hole"][0],
-                        "weakest_hole": item["weakest_hole"][0],
-                        "level_estimate": item["level"],
-                    }
-                    for item in selected_summaries
-                ]
+                prompt_data = build_ai_comparison_data(selected_summaries)
                 try:
                     client = OpenAI(api_key=api_key)
                     response = client.chat.completions.create(
@@ -447,11 +434,20 @@ with tabs[2]:
                             {
                                 "role": "system",
                                 "content": (
-                                    "あなたは親しみやすいゴルフコーチです。日本語で、"
-                                    "各人の変化、比較、得意・課題、具体的な練習案を簡潔に説明してください。"
-                                    "平均スコアは9ホール記録を含む18ホール換算の単純な参考値だと説明してください。"
-                                    "ラウンド数が少ない場合は断定を避け、レベル分類が公式ではないと明記してください。"
-                                    "データからわからないことは推測しないでください。"
+                                    "あなたはゴルフのデータアナリストである。日本語の「だ・である」調で、"
+                                    "簡潔かつ冷静に、数値と観測事実に基づく分析レポートを作成する。"
+                                    "渡された全員のデータを横断し、スコア、安定性、改善幅、Par別傾向を比較して、"
+                                    "プレイヤー間の差と順位を具体的に示す。比較対象が2人以上なら、"
+                                    "全員を含む順位または直接比較を最低1つ含める。"
+                                    "比較差はfirst_minus_secondの順で、平均スコア・対パー差は低い方、改善幅とレーダー点は高い方が優位である。"
+                                    "課題や弱点は曖昧にせず明確に指摘する。改善停滞や他者との差が大きい場合も、"
+                                    "煽り・冗談・皮肉・感情的な形容を使わず、数値を根拠に率直に述べる。"
+                                    "各指摘には関連する数値と実行可能な練習案を添える。"
+                                    "人格などスコアと無関係な評価はしない。"
+                                    "入力データにないショット・パットの成否や理由は推測せず、比較値を改変しない。"
+                                    "9ホール記録を含むため平均スコアと対パー差は18ホール換算の単純な参考値である。"
+                                    "ラウンド数・対象ホール数も考慮し、少数記録では結論を限定する。"
+                                    "レベル分類は公式ハンディキャップではない。"
                                 ),
                             },
                             {
@@ -460,7 +456,10 @@ with tabs[2]:
                             },
                         ],
                     )
-                    st.markdown(response.choices[0].message.content or "AIから本文が返りませんでした。")
+                    st.markdown(
+                        response.choices[0].message.content
+                        or "AIから本文が返りませんでした。"
+                    )
                 except APIError as error:
                     st.error(f"OpenAI APIの呼び出しに失敗しました: {error}")
 
