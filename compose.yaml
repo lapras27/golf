@@ -1,0 +1,15 @@
+services:
+  golf:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      GOLF_APP_PASSWORD: ${GOLF_APP_PASSWORD:?Set GOLF_APP_PASSWORD in .env}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    volumes:
+      - golf_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  golf_data:
